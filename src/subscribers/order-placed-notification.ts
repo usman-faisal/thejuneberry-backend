@@ -183,12 +183,12 @@ export default async function sendOrderConfirmationHandler({
     items: transformedItems,
   };
 
-  await notificationModuleService.createNotifications({
-    to: order.email,
-    channel: 'email',
-    template: 'order-placed',
-    data: { order: orderForEmail } satisfies OrderPlacedEmailProps,
-  });
+  // await notificationModuleService.createNotifications({
+  //   to: order.email,
+  //   channel: 'email',
+  //   template: 'order-placed',
+  //   data: { order: orderForEmail } satisfies OrderPlacedEmailProps,
+  // });
 }
 
 export const config: SubscriberConfig = {
