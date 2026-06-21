@@ -8,7 +8,6 @@ import {
   createShippingOptionsWorkflow,
   createShippingProfilesWorkflow,
   createStockLocationsWorkflow,
-  createTaxRegionsWorkflow,
   linkSalesChannelsToApiKeyWorkflow,
   linkSalesChannelsToStockLocationWorkflow,
   updateStoresWorkflow,
@@ -31,61 +30,62 @@ export default async function seedDemoData({ container }: ExecArgs) {
   const logger = container.resolve(ContainerRegistrationKeys.LOGGER);
   const remoteLink = container.resolve(ContainerRegistrationKeys.LINK);
 
-  // Resolve module services for idempotency checks
+  // Resolve all module services
   const fulfillmentModuleService: IFulfillmentModuleService = container.resolve(
-    Modules.FULFILLMENT,
+    Modules.FULFILLMENT
   );
   const salesChannelModuleService: ISalesChannelModuleService =
     container.resolve(Modules.SALES_CHANNEL);
   const storeModuleService: IStoreModuleService = container.resolve(
-    Modules.STORE,
+    Modules.STORE
   );
   const regionModuleService: IRegionModuleService = container.resolve(
-    Modules.REGION,
+    Modules.REGION
   );
   const productModuleService: IProductModuleService = container.resolve(
-    Modules.PRODUCT,
+    Modules.PRODUCT
   );
+  const apiKeyModuleService = container.resolve(Modules.API_KEY);
+  const stockLocationModuleService = container.resolve(Modules.STOCK_LOCATION);
 
-  logger.info("Starting The Juneberry minimal seed...");
+  logger.info("Starting The Juneberry seed...");
 
-  // 1. SETUP SALES CHANNEL
-  let [defaultSalesChannel] = await salesChannelModuleService.listSalesChannels(
-    {
-      name: "The Juneberry",
-    },
-  );
-
+  // 1. SALES CHANNEL — reuse existing default, rename if needed
+  logger.info("Setting up sales channel...");
+  let [defaultSalesChannel] =
+    await salesChannelModuleService.listSalesChannels();
   if (!defaultSalesChannel) {
-    const { result: salesChannelResult } = await createSalesChannelsWorkflow(
-      container,
-    ).run({
+    const { result } = await createSalesChannelsWorkflow(container).run({
       input: {
         salesChannelsData: [{ name: "The Juneberry" }],
       },
     });
-    defaultSalesChannel = salesChannelResult[0];
+    defaultSalesChannel = result[0];
+  } else if (defaultSalesChannel.name !== "The Juneberry") {
+    await salesChannelModuleService.updateSalesChannels(
+      defaultSalesChannel.id,
+      { name: "The Juneberry" }
+    );
   }
 
-  // 2. SETUP REGION & STORE CONFIG
+  // 2. REGION & STORE CONFIG
   logger.info("Configuring Pakistan region and PKR currency...");
   let [region] = await regionModuleService.listRegions({ name: "Pakistan" });
-
   if (!region) {
-    const { result: regionResult } = await createRegionsWorkflow(container).run(
-      {
-        input: {
-          regions: [
-            {
-              name: "Pakistan",
-              currency_code: "pkr",
-              countries: ["pk"],
-              payment_providers: ["pp_system_default"], // COD default
-            },
-          ],
-        },
+    const { result: regionResult } = await createRegionsWorkflow(
+      container
+    ).run({
+      input: {
+        regions: [
+          {
+            name: "Pakistan",
+            currency_code: "pkr",
+            countries: ["pk"],
+            payment_providers: ["pp_system_default"],
+          },
+        ],
       },
-    );
+    });
     region = regionResult[0];
   }
 
@@ -101,122 +101,156 @@ export default async function seedDemoData({ container }: ExecArgs) {
     },
   });
 
-  // 3. SETUP TAX REGIONS
-  logger.info("Setting up tax regions...");
-  try {
-    await createTaxRegionsWorkflow(container).run({
-      input: [{ country_code: "pk" }],
+  // 3. STOCK LOCATION — idempotent
+  logger.info("Setting up stock location...");
+  let stockLocation;
+  const existingLocations =
+    await stockLocationModuleService.listStockLocations({
+      name: "Main Warehouse",
     });
-  } catch (e) {
-    logger.info("Tax region for PK likely already exists, skipping...");
+  if (existingLocations.length === 0) {
+    const { result: stockLocationResult } =
+      await createStockLocationsWorkflow(container).run({
+        input: {
+          locations: [
+            {
+              name: "Main Warehouse",
+              address: {
+                city: "Karachi",
+                country_code: "PK",
+                address_1: "Shah Faisal Town",
+              },
+            },
+          ],
+        },
+      });
+    stockLocation = stockLocationResult[0];
+
+    await linkSalesChannelsToStockLocationWorkflow(container).run({
+      input: {
+        id: stockLocation.id,
+        add: [defaultSalesChannel.id],
+      },
+    });
+
+    await remoteLink.create({
+      [Modules.STOCK_LOCATION]: { stock_location_id: stockLocation.id },
+      [Modules.FULFILLMENT]: { fulfillment_provider_id: "manual_manual" },
+    });
+  } else {
+    stockLocation = existingLocations[0];
   }
 
-  // 4. SETUP INVENTORY & FULFILLMENT
-  logger.info("Configuring fulfillment and shipping...");
-  const { result: stockLocationResult } = await createStockLocationsWorkflow(
-    container,
-  ).run({
-    input: {
-      locations: [
-        {
-          name: "Main Warehouse",
-          address: {
-            city: "Karachi",
-            country_code: "PK",
-            address_1: "Shah Faisal Town",
+  // 4. SHIPPING PROFILE — idempotent
+  logger.info("Setting up shipping profile...");
+  let shippingProfile;
+  const existingProfiles =
+    await fulfillmentModuleService.listShippingProfiles({ type: "default" });
+  if (existingProfiles.length === 0) {
+    const { result: shippingProfileResult } =
+      await createShippingProfilesWorkflow(container).run({
+        input: {
+          data: [{ name: "Default Standard", type: "default" }],
+        },
+      });
+    shippingProfile = shippingProfileResult[0];
+  } else {
+    shippingProfile = existingProfiles[0];
+  }
+
+  // 5. FULFILLMENT SET & SHIPPING OPTION — idempotent
+  logger.info("Setting up fulfillment set and shipping options...");
+  const existingFulfillmentSets =
+    await fulfillmentModuleService.listFulfillmentSets({
+      name: "Pakistan Delivery",
+    });
+
+  if (existingFulfillmentSets.length === 0) {
+    const fulfillmentSet =
+      await fulfillmentModuleService.createFulfillmentSets({
+        name: "Pakistan Delivery",
+        type: "shipping",
+        service_zones: [
+          {
+            name: "Pakistan",
+            geo_zones: [{ country_code: "pk", type: "country" }],
           },
+        ],
+      });
+
+    await remoteLink.create({
+      [Modules.STOCK_LOCATION]: { stock_location_id: stockLocation.id },
+      [Modules.FULFILLMENT]: { fulfillment_set_id: fulfillmentSet.id },
+    });
+
+    await createShippingOptionsWorkflow(container).run({
+      input: [
+        {
+          name: "Standard Flat Rate",
+          price_type: "flat",
+          provider_id: "manual_manual",
+          service_zone_id: fulfillmentSet.service_zones[0].id,
+          shipping_profile_id: shippingProfile.id,
+          type: {
+            label: "Standard",
+            description: "Delivery across Pakistan in 3-5 working days.",
+            code: "standard",
+          },
+          prices: [
+            { currency_code: "pkr", amount: 200 },
+            { region_id: region.id, amount: 200 },
+          ],
+          rules: [
+            {
+              attribute: "enabled_in_store",
+              value: '"true"',
+              operator: "eq",
+            },
+            { attribute: "is_return", value: "false", operator: "eq" },
+          ],
         },
       ],
-    },
-  });
-  const stockLocation = stockLocationResult[0];
+    });
+  }
 
-  await linkSalesChannelsToStockLocationWorkflow(container).run({
-    input: {
-      id: stockLocation.id,
-      add: [defaultSalesChannel.id],
-    },
-  });
-
-  await remoteLink.create({
-    [Modules.STOCK_LOCATION]: { stock_location_id: stockLocation.id },
-    [Modules.FULFILLMENT]: { fulfillment_provider_id: "manual_manual" },
-  });
-
-  const { result: shippingProfileResult } =
-    await createShippingProfilesWorkflow(container).run({
+  // 6. API KEY — reuse existing, don't create duplicates
+  logger.info("Setting up API key...");
+  const existingKeys = await apiKeyModuleService.listApiKeys();
+  if (existingKeys.length === 0) {
+    const { result: publishableApiKeyResult } =
+      await createApiKeysWorkflow(container).run({
+        input: {
+          api_keys: [
+            { title: "Webshop", type: "publishable", created_by: "seed" },
+          ],
+        },
+      });
+    await linkSalesChannelsToApiKeyWorkflow(container).run({
       input: {
-        data: [{ name: "Default Standard", type: "default" }],
+        id: publishableApiKeyResult[0].id,
+        add: [defaultSalesChannel.id],
       },
     });
-  const shippingProfile = shippingProfileResult[0];
-
-  const fulfillmentSet = await fulfillmentModuleService.createFulfillmentSets({
-    name: "Pakistan Delivery",
-    type: "shipping",
-    service_zones: [
-      {
-        name: "Pakistan",
-        geo_zones: [{ country_code: "pk", type: "country" }],
-      },
-    ],
-  });
-
-  await remoteLink.create({
-    [Modules.STOCK_LOCATION]: { stock_location_id: stockLocation.id },
-    [Modules.FULFILLMENT]: { fulfillment_set_id: fulfillmentSet.id },
-  });
-
-  await createShippingOptionsWorkflow(container).run({
-    input: [
-      {
-        name: "Standard Flat Rate",
-        price_type: "flat",
-        provider_id: "manual_manual",
-        service_zone_id: fulfillmentSet.service_zones[0].id,
-        shipping_profile_id: shippingProfile.id,
-        type: {
-          label: "Standard",
-          description: "Delivery across Pakistan in 3-5 working days.",
-          code: "standard",
+  } else {
+    // Link the existing key to the sales channel if not already linked
+    try {
+      await linkSalesChannelsToApiKeyWorkflow(container).run({
+        input: {
+          id: existingKeys[0].id,
+          add: [defaultSalesChannel.id],
         },
-        prices: [
-          { currency_code: "pkr", amount: 200 },
-          { region_id: region.id, amount: 200 },
-        ],
-        rules: [
-          { attribute: "enabled_in_store", value: '"true"', operator: "eq" },
-          { attribute: "is_return", value: "false", operator: "eq" },
-        ],
-      },
-    ],
-  });
+      });
+    } catch (e) {
+      logger.info("API key already linked to sales channel, skipping...");
+    }
+  }
 
-  // 5. SETUP API KEYS
-  logger.info("Configuring API Keys...");
-  const { result: publishableApiKeyResult } = await createApiKeysWorkflow(
-    container,
-  ).run({
-    input: {
-      api_keys: [{ title: "Webshop", type: "publishable", created_by: "seed" }],
-    },
-  });
-
-  await linkSalesChannelsToApiKeyWorkflow(container).run({
-    input: {
-      id: publishableApiKeyResult[0].id,
-      add: [defaultSalesChannel.id],
-    },
-  });
-
-  // 6. SETUP CATEGORIES & COLLECTIONS
-  logger.info("Seeding Collections and Categories...");
-
-  const existingCategories = await productModuleService.listProductCategories();
-  let categories = existingCategories;
-
-  if (categories.length === 0) {
-    const { result } = await createProductCategoriesWorkflow(container).run({
+  // 7. CATEGORIES — idempotent
+  logger.info("Seeding categories...");
+  const existingCategories =
+    await productModuleService.listProductCategories();
+  if (existingCategories.length === 0) {
+    await createProductCategoriesWorkflow(container).run({
       input: {
         product_categories: [
           { name: "Linen", is_active: true },
@@ -226,17 +260,22 @@ export default async function seedDemoData({ container }: ExecArgs) {
         ],
       },
     });
-    categories = result;
   }
 
+  // Refetch categories after potential creation
+  const categories = await productModuleService.listProductCategories();
+
+  // 8. COLLECTIONS — idempotent
+  logger.info("Seeding collections...");
   const existingCollections =
     await productModuleService.listProductCollections();
-  let collections = existingCollections;
 
-  if (collections.length === 0) {
+  let collections = existingCollections;
+  if (existingCollections.length === 0) {
     const { result } = await createCollectionsWorkflow(container).run({
       input: {
         collections: [
+          { title: "New Arrivals", handle: "new-arrivals" },
           { title: "Winter Collection", handle: "winter-collection" },
           { title: "Summer Collection", handle: "summer-collection" },
         ],
@@ -245,19 +284,14 @@ export default async function seedDemoData({ container }: ExecArgs) {
     collections = result;
   }
 
-  // 7. SETUP PRODUCTS
-  logger.info("Seeding Products...");
+  // 9. PRODUCTS — idempotent
+  logger.info("Seeding products...");
   const existingProducts = await productModuleService.listProducts();
 
   if (existingProducts.length === 0) {
     const sizes = ["S", "M", "L", "XL"];
 
-    // Helper to generate variants mapped to sizes
-    const generateSizeVariants = (
-      baseTitle: string,
-      baseSku: string,
-      priceAmount: number,
-    ) => {
+    const generateSizeVariants = (baseSku: string, priceAmount: number) => {
       return sizes.map((size) => ({
         title: size,
         sku: `${baseSku}-${size}`,
@@ -266,6 +300,16 @@ export default async function seedDemoData({ container }: ExecArgs) {
         prices: [{ amount: priceAmount, currency_code: "pkr" }],
       }));
     };
+
+    const newArrivalsCollection = collections.find(
+      (c) => c.handle === "new-arrivals"
+    );
+    const winterCollection = collections.find(
+      (c) => c.handle === "winter-collection"
+    );
+    const summerCollection = collections.find(
+      (c) => c.handle === "summer-collection"
+    );
 
     await createProductsWorkflow(container).run({
       input: {
@@ -279,16 +323,10 @@ export default async function seedDemoData({ container }: ExecArgs) {
               categories.find((c) => c.name === "Linen")?.id ||
                 categories[0].id,
             ],
-            collection_id: collections.find(
-              (c) => c.title === "Summer Collection",
-            )?.id,
+            collection_id: newArrivalsCollection?.id || summerCollection?.id,
             status: ProductStatus.PUBLISHED,
             options: [{ title: "Size", values: sizes }],
-            variants: generateSizeVariants(
-              "Sapphire Breeze",
-              "SAPPHIRE-LAWN",
-              3500,
-            ),
+            variants: generateSizeVariants("SAPPHIRE-LAWN", 3500),
             sales_channels: [{ id: defaultSalesChannel.id }],
           },
           {
@@ -300,16 +338,10 @@ export default async function seedDemoData({ container }: ExecArgs) {
               categories.find((c) => c.name === "Taftan")?.id ||
                 categories[0].id,
             ],
-            collection_id: collections.find(
-              (c) => c.title === "Winter Collection",
-            )?.id,
+            collection_id: newArrivalsCollection?.id || winterCollection?.id,
             status: ProductStatus.PUBLISHED,
             options: [{ title: "Size", values: sizes }],
-            variants: generateSizeVariants(
-              "Midnight Velvet",
-              "MIDNIGHT-TAFTAN",
-              6000,
-            ),
+            variants: generateSizeVariants("MIDNIGHT-TAFTAN", 6000),
             sales_channels: [{ id: defaultSalesChannel.id }],
           },
           {
@@ -321,16 +353,10 @@ export default async function seedDemoData({ container }: ExecArgs) {
               categories.find((c) => c.name === "Tissue")?.id ||
                 categories[0].id,
             ],
-            collection_id: collections.find(
-              (c) => c.title === "Summer Collection",
-            )?.id,
+            collection_id: summerCollection?.id,
             status: ProductStatus.PUBLISHED,
             options: [{ title: "Size", values: sizes }],
-            variants: generateSizeVariants(
-              "Gulbahar Tissue",
-              "GULBAHAR-TISSUE",
-              4800,
-            ),
+            variants: generateSizeVariants("GULBAHAR-TISSUE", 4800),
             sales_channels: [{ id: defaultSalesChannel.id }],
           },
         ],
@@ -338,5 +364,5 @@ export default async function seedDemoData({ container }: ExecArgs) {
     });
   }
 
-  logger.info("Successfully finished seeding The Juneberry demo data!");
+  logger.info("The Juneberry seed completed successfully!");
 }
