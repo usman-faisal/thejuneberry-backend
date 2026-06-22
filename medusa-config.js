@@ -5,7 +5,7 @@ loadEnv(process.env.NODE_ENV, process.cwd());
 module.exports = defineConfig({
   admin: {
     backendUrl:
-      process.env.BACKEND_URL ?? 'https://sofa-society-starter.medusajs.app',
+      process.env.BACKEND_URL ?? 'https://api.thejuneberry.store',
     storefrontUrl: process.env.STOREFRONT_URL,
   },
   projectConfig: {
