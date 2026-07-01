@@ -9,6 +9,7 @@ import { ImageField, imageFieldSchema } from '../components/Form/ImageField';
 import { Form } from '../components/Form/Form';
 import { TextareaField } from '../components/Form/TextareaField';
 import { InputField } from '../components/Form/InputField';
+import { sdk } from '../lib/sdk';
 
 const detailsFormSchema = z.object({
   image: imageFieldSchema().optional(),
@@ -44,10 +45,9 @@ const UpdateDetailsDrawer: React.FC<{
           <Form
             schema={detailsFormSchema}
             onSubmit={async (values) => {
-              await fetch(`/admin/custom/collections/${id}/details`, {
+              await sdk.client.fetch(`/admin/custom/collections/${id}/details`, {
                 method: 'POST',
-                body: JSON.stringify(values),
-                credentials: 'include',
+                body: values,
               });
 
               onSave(values);
@@ -129,10 +129,10 @@ const CollectionDetailsWidget = ({
   > | null>(null);
 
   React.useEffect(() => {
-    fetch(`/admin/custom/collections/${data.id}/details`, {
-      credentials: 'include',
-    })
-      .then((res) => res.json())
+    sdk.client
+      .fetch<z.infer<typeof detailsFormSchema>>(
+        `/admin/custom/collections/${data.id}/details`,
+      )
       .then((json) => {
         setDetails(json);
       })
